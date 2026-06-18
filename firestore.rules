@@ -31,6 +31,10 @@ service cloud.firestore {
       allow update: if request.auth != null && (
         isAdmin() || 
         (
+          resource.data.studentId == request.auth.uid &&
+          request.resource.data.studentId == request.auth.uid
+        ) ||
+        (
           resource.data.status == 'Available' &&
           request.resource.data.status == 'Taken' &&
           request.resource.data.studentId == request.auth.uid

@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { collection, query, onSnapshot, doc, addDoc, updateDoc, setDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Plus, Trash2, RotateCcw, AlertTriangle, Users, BookOpen, Download, UserCheck, Shield, Settings, CheckCircle2 } from 'lucide-react';
+import { Plus, Trash2, RotateCcw, AlertTriangle, Users, BookOpen, Download, UserCheck, Shield, Settings, CheckCircle2, Eye, EyeOff, ClipboardCheck, Award, Sparkles, Loader2, Check } from 'lucide-react';
 import { format } from 'date-fns';
+import SubmissionsView from '../components/SubmissionsView';
 
 interface Topic {
   id: string;
@@ -14,7 +15,21 @@ interface Topic {
   studentId?: string;
   studentName?: string;
   studentBatch?: string;
+  studentEmail?: string;
   timestamp?: string;
+  deadline?: string | null;
+  createdAt?: string;
+  topicEmail?: string;
+  published?: boolean;
+  assignmentSubmitted?: boolean;
+  submissionMessage?: string;
+  submissionTimestamp?: string;
+  submittedFileName?: string;
+  grade?: number | null;
+  gradeOutOf?: number | null;
+  gradedAt?: string;
+  gradeMessage?: string;
+  graded?: boolean;
 }
 
 export default function AdminDashboard() {
@@ -22,14 +37,22 @@ export default function AdminDashboard() {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [usersList, setUsersList] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'topics' | 'users' | 'settings'>('topics');
+  const [activeTab, setActiveTab] = useState<'topics' | 'submissions' | 'users' | 'settings'>('topics');
   const [selectedSubject, setSelectedSubject] = useState<string>('All');
   
   // New topic form
   const [isAdding, setIsAdding] = useState(false);
   const [subject, setSubject] = useState('');
   const [topicDeadline, setTopicDeadline] = useState<string>('');
+  const [topicEmail, setTopicEmail] = useState('');
   const [topicInputs, setTopicInputs] = useState([{ title: '', description: '' }]);
+
+  // AI Topic Generator state
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiSubject, setAiSubject] = useState('');
+  const [aiCount, setAiCount] = useState<number>(3);
+  const [aiLoading, setAiLoading] = useState(false);
+  const [generatedTopics, setGeneratedTopics] = useState<Array<{ title: string; description: string; subject: string; selected: boolean }>>([]);
 
   // Confirmation state
   const [confirmModal, setConfirmModal] = useState<{
@@ -206,8 +229,7 @@ export default function AdminDashboard() {
     setTopicInputs(newInputs);
   };
 
-  const handleAddTopic = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAddTopic = async (published: boolean) => {
     if (!subject.trim()) {
       showNotification('error', "Please enter a subject.");
       return;
@@ -230,6 +252,8 @@ export default function AdminDashboard() {
           subject: subject.trim(),
           status: 'Available',
           deadline: topicDeadline ? new Date(topicDeadline).toISOString() : null,
+          topicEmail: topicEmail.trim() || null,
+          published: published,
           createdAt: new Date().toISOString()
         });
       }
@@ -237,11 +261,105 @@ export default function AdminDashboard() {
       
       setSubject('');
       setTopicDeadline('');
+      setTopicEmail('');
       setTopicInputs([{ title: '', description: '' }]);
-      showNotification('success', 'Topics added successfully!');
+      showNotification('success', published ? 'Topics published successfully!' : 'Topics saved as draft successfully!');
     } catch (error: any) {
       console.error("Error adding topics: ", error);
       showNotification('error', "Failed to add topics: " + (error?.message || error));
+    } finally {
+      setIsAdding(false);
+    }
+  };
+
+  const handleTogglePublish = async (topicId: string, currentPublished: boolean) => {
+    try {
+      await updateDoc(doc(db, "topics", topicId), {
+        published: !currentPublished
+      });
+      showNotification('success', currentPublished ? 'Moved topic to drafts.' : 'Topic published successfully!');
+    } catch (error: any) {
+      console.error("Error toggling publish state:", error);
+      showNotification('error', "Failed to update publication status: " + (error?.message || error));
+    }
+  };
+
+  const handleGenerateAiTopics = async () => {
+    if (!aiPrompt.trim()) {
+      showNotification('error', "প্রম্পট খালি রাখা যাবে না। অনুগ্রহ করে একটি প্রম্পট লিখুন।");
+      return;
+    }
+    setAiLoading(true);
+    setGeneratedTopics([]);
+    try {
+      const response = await fetch('/api/generate-topics', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          prompt: aiPrompt,
+          count: aiCount,
+          subject: aiSubject
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.error || 'Failed to generate topics.');
+      }
+
+      const data = await response.json();
+      if (data.topics && data.topics.length > 0) {
+        setGeneratedTopics(data.topics.map((t: any) => ({
+          title: t.title || '',
+          description: t.description || '',
+          subject: aiSubject || 'General',
+          selected: true
+        })));
+        showNotification('success', `AI দিয়ে ${data.topics.length}টি টপিক সফলভাবে তৈরি হয়েছে!`);
+      } else {
+        throw new Error('কোন টপিক তৈরি করা যায়নি। অন্য কোনো প্রম্পট দিয়ে চেষ্টা করুন।');
+      }
+    } catch (error: any) {
+      console.error(error);
+      showNotification('error', "AI টপিক জেনারেট ত্রুটি: " + (error?.message || error));
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleSaveGeneratedTopics = async (publishImmediate: boolean) => {
+    const selected = generatedTopics.filter(t => t.selected && t.title.trim());
+    if (selected.length === 0) {
+      showNotification('error', 'কোন টপিক সিলেক্ট করা হয়নি বা সিলেক্ট করা টপিকের টাইটেল খালি।');
+      return;
+    }
+
+    setIsAdding(true);
+    try {
+      const batch = writeBatch(db);
+      for (const t of selected) {
+        const docRef = doc(collection(db, "topics"));
+        batch.set(docRef, {
+          title: t.title.trim(),
+          description: t.description.trim(),
+          subject: aiSubject.trim() || 'General',
+          status: 'Available',
+          deadline: topicDeadline ? new Date(topicDeadline).toISOString() : null,
+          topicEmail: topicEmail.trim() || null,
+          published: publishImmediate,
+          createdAt: new Date().toISOString()
+        });
+      }
+      await batch.commit();
+
+      showNotification('success', publishImmediate ? 'AI দিয়ে তৈরি টপিকগুলো সরাসরি পাবলিশ করা হয়েছে!' : 'AI দিয়ে তৈরি টপিকগুলো ড্রাফট হিসেবে সেভ করা হয়েছে!');
+      setGeneratedTopics([]);
+      setAiPrompt('');
+    } catch (error: any) {
+      console.error("Error committing AI topics: ", error);
+      showNotification('error', "টপিক সেভ করতে ব্যর্থ হয়েছে: " + (error?.message || error));
     } finally {
       setIsAdding(false);
     }
@@ -331,17 +449,29 @@ export default function AdminDashboard() {
   const totalTopics = filteredTopics.length;
   const takenTopics = filteredTopics.filter(t => t.status === 'Taken').length;
   const availableTopics = totalTopics - takenTopics;
+  const pendingGradingCount = topics.filter(t => t.assignmentSubmitted && !t.graded).length;
 
   return (
     <div className="flex flex-col gap-6 w-full">
       
       {/* Tabs Navigation */}
-      <div className="flex bg-white rounded-2xl shadow-sm border border-slate-200 p-1 flex-wrap md:flex-nowrap">
+      <div className="flex bg-white rounded-2xl shadow-sm border border-slate-200 p-1 flex-wrap md:flex-nowrap gap-1">
         <button
           onClick={() => setActiveTab('topics')}
           className={`flex-1 py-3 px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-sm transition-all ${activeTab === 'topics' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
         >
           <BookOpen className="w-5 h-5" /> Manage Topics
+        </button>
+        <button
+          onClick={() => setActiveTab('submissions')}
+          className={`flex-1 py-3 px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-sm transition-all relative ${activeTab === 'submissions' ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}
+        >
+          <ClipboardCheck className="w-5 h-5" /> Submissions
+          {pendingGradingCount > 0 && (
+            <span className="bg-rose-500 text-white text-[10px] px-1.5 py-0.5 rounded-full font-bold min-w-[18px] text-center">
+              {pendingGradingCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => setActiveTab('users')}
@@ -478,9 +608,43 @@ export default function AdminDashboard() {
                             )}
                           </div>
                         )}
+
+                        <div className="flex flex-wrap gap-2 mt-2">
+                          {topic.published === false ? (
+                            <span className="inline-flex items-center gap-1 text-amber-600 font-bold text-[10px] bg-amber-50 px-2 py-0.5 rounded-md border border-amber-100 uppercase tracking-wider">
+                              Draft
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 text-teal-600 font-bold text-[10px] bg-teal-50 px-2 py-0.5 rounded-md border border-teal-100 uppercase tracking-wider">
+                              Published
+                            </span>
+                          )}
+                          {topic.topicEmail && (
+                            <span className="inline-flex items-center gap-1 text-slate-500 font-semibold text-[10px] bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                              Mail: {topic.topicEmail}
+                            </span>
+                          )}
+                        </div>
                       </div>
                       
                       <div className="flex items-center gap-2 shrink-0">
+                        {topic.published === false ? (
+                          <button 
+                            onClick={() => handleTogglePublish(topic.id, false)}
+                            className="p-2 text-amber-500 hover:bg-amber-50 rounded-xl transition-colors border border-transparent hover:border-amber-200"
+                            title="Publish Topic (Make Visible to Students)"
+                          >
+                            <EyeOff className="w-4 h-4" />
+                          </button>
+                        ) : (
+                          <button 
+                            onClick={() => handleTogglePublish(topic.id, true)}
+                            className="p-2 text-teal-600 hover:bg-teal-50 rounded-xl transition-colors border border-transparent hover:border-teal-200"
+                            title="Move to Draft (Hide from Students)"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                        )}
                         {topic.status === 'Taken' && (
                           <button 
                             onClick={() => handleResetTopic(topic)}
@@ -508,13 +672,195 @@ export default function AdminDashboard() {
 
         {/* Right Column: Add Topic Form in Dark Bento Style */}
         <div className="lg:col-span-4 flex flex-col gap-6">
+          {/* AI Topic Generator Card */}
+          <div className="bg-slate-900 rounded-3xl p-6 text-white flex flex-col gap-4 shadow-xl border border-slate-800/85 relative overflow-hidden">
+            {/* Background glowing aura */}
+            <div className="absolute top-0 right-0 w-32 h-32 bg-teal-500/10 rounded-full blur-3xl pointer-events-none"></div>
+            
+            <div className="flex items-center gap-2.5">
+              <div className="bg-teal-500/10 p-2 rounded-xl border border-teal-500/20">
+                <Sparkles className="w-5 h-5 text-teal-400 animate-pulse" />
+              </div>
+              <div>
+                <h2 className="text-md font-bold text-white flex items-center gap-2">
+                  AI Topic Generator <span className="text-[10px] bg-teal-500/20 text-teal-300 px-1.5 py-0.5 rounded font-mono">GEMINI AI</span>
+                </h2>
+                <p className="text-[11px] text-slate-400 font-medium">সহজে এবং দ্রুত প্রম্পট দিয়ে গবেষণা টপিক তৈরি করুন</p>
+              </div>
+            </div>
+
+            {generatedTopics.length === 0 ? (
+              <div className="space-y-4 pt-2">
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">What is the topic about? (কী বিষয়ে টপিক তৈরি করবেন?)</label>
+                  <textarea 
+                    rows={3}
+                    placeholder="যেমনঃ 'React JS এর মৌলিক বিষয়ের উপর ৫টি গবেষণা প্রস্তাবনা' অথবা '১০টি আধুনিক সমাজবিজ্ঞান ও ইসলামী চিন্তাধারার উপর গবেষণাধর্মী টপিক'..."
+                    className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-teal-500/50 focus:border-transparent text-xs placeholder:text-slate-500 text-white transition-all resize-none shadow-inner"
+                    value={aiPrompt}
+                    onChange={(e) => setAiPrompt(e.target.value)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 font-sans">Subject / Category</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. Science, Hadith"
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/50 text-xs text-white"
+                      value={aiSubject}
+                      onChange={(e) => setAiSubject(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 font-sans">How Many</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/50 text-xs text-white"
+                      value={aiCount}
+                      onChange={(e) => setAiCount(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 font-sans">Deadline (Optional)</label>
+                        <input
+                            type="datetime-local"
+                            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/50 text-xs text-white"
+                            style={{ colorScheme: 'dark' }}
+                            value={topicDeadline}
+                            onChange={(e) => setTopicDeadline(e.target.value)}
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 font-sans">Notification Email (Optional)</label>
+                        <input
+                            type="email"
+                            placeholder="e.g. email@domain.com"
+                            className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-teal-500/50 text-xs text-white"
+                            value={topicEmail}
+                            onChange={(e) => setTopicEmail(e.target.value)}
+                        />
+                    </div>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={aiLoading}
+                  onClick={handleGenerateAiTopics}
+                  className="w-full py-3 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-2xl text-xs uppercase tracking-widest transition-all disabled:opacity-50 flex items-center justify-center gap-2 mt-2 cursor-pointer shadow-md shadow-teal-900/30"
+                >
+                  {aiLoading ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                      <span>Generating Topics...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="w-3.5 h-3.5 text-teal-200" />
+                      <span>AI দিয়ে টপিক জেনারেট করুন</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4 pt-1">
+                <div className="flex justify-between items-center bg-slate-850 p-2 rounded-xl border border-slate-800">
+                  <span className="text-xs font-bold text-teal-300">Generated Drafts ({generatedTopics.length})</span>
+                  <button 
+                    onClick={() => setGeneratedTopics([])}
+                    className="text-[10px] text-slate-400 hover:text-white transition-colors underline"
+                  >
+                    Reset & Start Over
+                  </button>
+                </div>
+
+                <div className="space-y-3 max-h-72 overflow-y-auto pr-1">
+                  {generatedTopics.map((topic, idx) => (
+                    <div key={idx} className="bg-slate-800/80 p-3 rounded-2xl border border-slate-700/60 flex gap-2.5 items-start">
+                      <input 
+                        type="checkbox" 
+                        className="mt-1 accent-teal-500 cursor-pointer h-4 w-4 rounded border-slate-600"
+                        checked={topic.selected}
+                        onChange={(e) => {
+                          const updated = [...generatedTopics];
+                          updated[idx].selected = e.target.checked;
+                          setGeneratedTopics(updated);
+                        }}
+                      />
+                      <div className="flex-1 space-y-1.5">
+                        <input 
+                          type="text"
+                          className="w-full bg-slate-900 px-2 py-1 text-xs text-white rounded border border-slate-700 focus:outline-none focus:ring-1 focus:ring-teal-500 font-bold"
+                          value={topic.title}
+                          onChange={(e) => {
+                            const updated = [...generatedTopics];
+                            updated[idx].title = e.target.value;
+                            setGeneratedTopics(updated);
+                          }}
+                        />
+                        <textarea 
+                          rows={2}
+                          className="w-full bg-slate-900 px-2 py-1 text-[11px] text-slate-300 rounded border border-slate-700 focus:outline-none focus:ring-1 focus:ring-teal-500 resize-none leading-relaxed"
+                          value={topic.description}
+                          onChange={(e) => {
+                            const updated = [...generatedTopics];
+                            updated[idx].description = e.target.value;
+                            setGeneratedTopics(updated);
+                          }}
+                        />
+                        <div className="flex justify-between items-center text-[10px] text-slate-500">
+                          <span>Subject Category:</span>
+                          <input 
+                            type="text"
+                            className="bg-transparent text-right text-teal-400 font-bold max-w-[120px] focus:outline-none uppercase text-[9px]"
+                            value={topic.subject}
+                            onChange={(e) => {
+                              const updated = [...generatedTopics];
+                              updated[idx].subject = e.target.value;
+                              setGeneratedTopics(updated);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 pt-2">
+                  <button
+                    type="button"
+                    disabled={isAdding}
+                    onClick={() => handleSaveGeneratedTopics(false)}
+                    className="py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-[10px] uppercase tracking-wider transition-all border border-slate-700 cursor-pointer"
+                  >
+                    Save as Draft
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isAdding}
+                    onClick={() => handleSaveGeneratedTopics(true)}
+                    className="py-2.5 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-[10px] uppercase tracking-wider transition-all shadow-md shadow-teal-900/30 cursor-pointer"
+                  >
+                    {isAdding ? 'Saving...' : 'Publish Live'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
           <div className="bg-slate-900 rounded-3xl p-6 text-white flex flex-col justify-between shadow-sm border border-slate-800">
             <div className="mb-6">
-              <h2 className="text-lg font-bold mb-1 text-white">Add New Topic</h2>
+              <h2 className="text-lg font-bold mb-1 text-white">Add New Topic (Manual)</h2>
               <p className="text-xs text-slate-400">Management overrides and system control</p>
             </div>
             
-            <form onSubmit={handleAddTopic} className="space-y-4">
+            <form onSubmit={(e) => { e.preventDefault(); }} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Subject / Category</label>
                 <input 
@@ -536,6 +882,18 @@ export default function AdminDashboard() {
                   onChange={(e) => setTopicDeadline(e.target.value)}
                 />
                 <p className="text-[10px] text-slate-500 mt-1">Specify the global submission date and time for topics under this subject.</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Notification Email for Topics (Optional)</label>
+                <input 
+                  type="email" 
+                  placeholder="e.g. supervisor@domain.com"
+                  className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-2xl focus:outline-none focus:ring-2 focus:ring-teal-500 focus:border-transparent text-sm placeholder:text-slate-500 text-white transition-all shadow-inner"
+                  value={topicEmail}
+                  onChange={(e) => setTopicEmail(e.target.value)}
+                />
+                <p className="text-[10px] text-slate-500 mt-1">Updates for claims of these topics are sent to this address. Falls back to global/subject emails if left blank.</p>
               </div>
 
               <div className="space-y-4">
@@ -584,13 +942,24 @@ export default function AdminDashboard() {
                 <Plus className="w-3 h-3" /> Add Another Topic to Subject
               </button>
 
-              <button 
-                type="submit" 
-                disabled={isAdding}
-                className="w-full py-3 mt-4 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-2xl text-xs uppercase tracking-widest transition-all disabled:opacity-70 shadow-sm shadow-teal-900/50 flex items-center justify-center gap-2"
-              >
-                {isAdding ? 'Saving Titles...' : <><CheckCircle2 className="w-4 h-4" /> Save Topics to Subject</>}
-              </button>
+              <div className="flex gap-3 mt-4">
+                <button 
+                  type="button" 
+                  disabled={isAdding}
+                  onClick={() => handleAddTopic(false)}
+                  className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-2xl text-xs uppercase tracking-widest transition-all disabled:opacity-70 border border-slate-700 flex items-center justify-center gap-2"
+                >
+                  Save as Draft
+                </button>
+                <button 
+                  type="button" 
+                  disabled={isAdding}
+                  onClick={() => handleAddTopic(true)}
+                  className="flex-1 py-3 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-2xl text-xs uppercase tracking-widest transition-all disabled:opacity-70 shadow-sm shadow-teal-900/50 flex items-center justify-center gap-2"
+                >
+                  {isAdding ? 'Saving...' : 'Publish'}
+                </button>
+              </div>
             </form>
 
             <div className="mt-6 pt-6 border-t border-slate-800">
@@ -629,6 +998,8 @@ export default function AdminDashboard() {
         </div>
 
       </div>
+      ) : activeTab === 'submissions' ? (
+        <SubmissionsView topics={topics} />
       ) : activeTab === 'users' ? (
         <div className="bg-white rounded-3xl border border-slate-200 flex flex-col overflow-hidden shadow-sm flex-1">
           <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-white">

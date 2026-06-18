@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, onSnapshot, doc, runTransaction, getDoc } from 'firebase/firestore';
+import { collection, query, onSnapshot, doc, runTransaction, getDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../contexts/AuthContext';
-import { CheckCircle2, Lock, Unlock, Search, UploadCloud, FileText } from 'lucide-react';
+import { CheckCircle2, Lock, Unlock, Search, UploadCloud, FileText, Award } from 'lucide-react';
 import { format } from 'date-fns';
 
 interface Topic {
@@ -14,8 +14,20 @@ interface Topic {
   studentId?: string;
   studentName?: string;
   studentBatch?: string;
+  studentEmail?: string;
   timestamp?: string;
   deadline?: string;
+  topicEmail?: string;
+  published?: boolean;
+  assignmentSubmitted?: boolean;
+  submissionMessage?: string;
+  submissionTimestamp?: string;
+  submittedFileName?: string;
+  grade?: number | null;
+  gradeOutOf?: number | null;
+  gradedAt?: string;
+  gradeMessage?: string;
+  graded?: boolean;
 }
 
 interface SelectedTopicCardProps {
@@ -83,19 +95,26 @@ const SelectedTopicCard = ({ topic, globalSettings, user, studentName, studentBa
     setUploading(true);
     setUploadMessage({ type: '', text: '' });
 
+    const finalStudentName = studentName || topic.studentName || 'Unknown Student';
+    const finalStudentBatch = studentBatch || topic.studentBatch || 'Unknown Batch';
+    const finalStudentEmail = user.email || topic.studentEmail || 'Unknown Email';
+
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('studentName', studentName || 'Unknown');
-    formData.append('studentEmail', user.email || 'Unknown Email');
-    formData.append('studentBatch', studentBatch || '');
+    formData.append('studentName', finalStudentName);
+    formData.append('studentEmail', finalStudentEmail);
+    formData.append('studentBatch', finalStudentBatch);
     formData.append('topicTitle', topic.title);
     formData.append('topicId', topic.id);
     formData.append('message', message);
     
-    // Determine the target email based on subject overriding
-    let targetEmail = globalSettings?.adminEmail || '';
-    if (topic.subject && globalSettings?.subjectEmails && globalSettings.subjectEmails[topic.subject]) {
+    // Determine the target email based on topic email first, then subject overriding, then global admin email
+    let targetEmail = topic.topicEmail || '';
+    if (!targetEmail && topic.subject && globalSettings?.subjectEmails && globalSettings.subjectEmails[topic.subject]) {
       targetEmail = globalSettings.subjectEmails[topic.subject];
+    }
+    if (!targetEmail) {
+      targetEmail = globalSettings?.adminEmail || '';
     }
     if (targetEmail) {
       formData.append('targetAdminEmail', targetEmail);
@@ -107,13 +126,40 @@ const SelectedTopicCard = ({ topic, globalSettings, user, studentName, studentBa
         body: formData,
       });
 
-      const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Upload failed');
+      let data;
+      const contentType = res.headers.get('content-type');
+      if (contentType && contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        const shortText = text.substring(0, 100).replace(/\n/g, ' ');
+        console.error('Non-JSON Response from server:', res.status, res.statusText, text.substring(0, 300));
+        throw new Error(`সার্ভার থেকে সঠিক রেসপন্স পাওয়া যায়নি (Status: ${res.status} ${res.statusText}). Error: ${shortText}`);
       }
 
-      setUploadMessage({ type: 'success', text: 'Assignment submitted successfully! Admin will receive it via email.' });
+      if (!res.ok) {
+        throw new Error(data?.error || 'Upload failed');
+      }
+
+      // Save submission state to firestore
+      const topicRef = doc(db, 'topics', topic.id);
+      await updateDoc(topicRef, {
+        assignmentSubmitted: true,
+        submissionMessage: message || '',
+        submissionTimestamp: new Date().toISOString(),
+        submittedFileName: file?.name || 'assignment.pdf',
+        studentId: user.uid,
+        studentName: finalStudentName,
+        studentBatch: finalStudentBatch,
+        studentEmail: finalStudentEmail,
+        graded: false,
+        grade: null,
+        gradeOutOf: null,
+        gradedAt: null,
+        gradeMessage: null
+      });
+
+      setUploadMessage({ type: 'success', text: 'Assignment submitted successfully! Admin will see it and receive it via email.' });
       setFile(null);
       setMessage('');
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -154,50 +200,154 @@ const SelectedTopicCard = ({ topic, globalSettings, user, studentName, studentBa
         </div>
       </div>
 
-      <div className="w-full md:w-96 shrink-0 bg-white rounded-2xl p-5 border border-teal-100 shadow-sm relative z-10">
-         <h3 className="text-sm font-bold text-slate-800 mb-3 flex items-center gap-2">
-           <FileText className="w-4 h-4 text-teal-600" /> Submit Assignment
-         </h3>
-         {timeLeft === 'Expired' ? (
-            <div className="bg-rose-50 border border-rose-100 p-4 rounded-xl text-center">
-              <p className="text-sm font-bold text-rose-700">Deadline Expired</p>
-              <p className="text-xs text-rose-600 mt-1">You can no longer submit the assignment for this topic.</p>
-            </div>
+      <div className="w-full md:w-96 shrink-0 bg-white rounded-2xl p-5 border border-teal-100 shadow-sm relative z-10 flex flex-col gap-4">
+         {topic.assignmentSubmitted ? (
+           <div className="space-y-4">
+             <div className="flex justify-between items-center bg-teal-50 border border-teal-100 rounded-xl p-3.5">
+               <div className="flex items-center gap-2">
+                 <div className="w-2.5 h-2.5 bg-teal-500 rounded-full animate-pulse" />
+                 <span className="text-xs font-bold text-teal-800 uppercase tracking-wide">Assignment Submitted</span>
+               </div>
+               <span className="text-[10px] text-slate-400 font-medium font-mono">
+                 {topic.submissionTimestamp ? format(new Date(topic.submissionTimestamp), 'MMM dd, HH:mm') : ''}
+               </span>
+             </div>
+
+             {/* Grades/Marks Area */}
+             {topic.graded ? (
+               <div className="bg-amber-50/60 border border-amber-200/80 rounded-2xl p-4 flex flex-col gap-2">
+                 <div className="flex items-center gap-2">
+                   <Award className="w-5 h-5 text-amber-600 shrink-0" />
+                   <h4 className="text-xs font-extrabold text-amber-800 uppercase tracking-widest">Marking & Faculty Grade</h4>
+                 </div>
+                 <div className="mt-1 flex items-baseline gap-1.5">
+                   <span className="text-3xl font-black text-amber-900 tracking-tight">{topic.grade}</span>
+                   <span className="text-xs font-bold text-slate-500">out of</span>
+                   <span className="text-base font-extrabold text-slate-700">{topic.gradeOutOf}</span>
+                 </div>
+                 {topic.gradeMessage && (
+                   <div className="mt-2 text-xs text-slate-700 bg-white/70 border border-amber-100 rounded-xl p-2.5 italic">
+                     "{topic.gradeMessage}"
+                   </div>
+                 )}
+               </div>
+             ) : (
+               <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex items-center gap-3">
+                 <div className="w-10 h-10 bg-slate-200/60 rounded-xl flex items-center justify-center text-slate-500 shrink-0">
+                   <FileText className="w-5 h-5" />
+                 </div>
+                 <div>
+                   <h4 className="text-xs font-bold text-slate-700">Pending Evaluation</h4>
+                   <p className="text-[10px] text-slate-500 mt-0.5">Faculty is reviewing your submission.</p>
+                 </div>
+               </div>
+             )}
+
+             {/* File Info */}
+             <div className="text-xs bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-col gap-1">
+               <div className="flex justify-between items-center">
+                 <span className="font-bold text-slate-600 block truncate max-w-[200px]" title={topic.submittedFileName}>
+                   📂 {topic.submittedFileName || 'assignment.pdf'}
+                 </span>
+               </div>
+               {topic.submissionMessage && (
+                 <p className="text-[11px] text-slate-500 mt-1 line-clamp-2 border-t border-slate-200/60 pt-1.5">
+                   <strong>Message:</strong> {topic.submissionMessage}
+                 </p>
+               )}
+             </div>
+
+             {/* Re-submission Form Toggle */}
+             {false && (
+               <button
+                 type="button"
+                 onClick={async () => {
+                   try {
+                     const topicRef = doc(db, 'topics', topic.id);
+                     await updateDoc(topicRef, {
+                        assignmentSubmitted: false
+                     });
+                   } catch (err) {
+                     console.error(err);
+                   }
+                 }}
+                 className="w-full py-2 bg-slate-100 hover:bg-slate-200 border border-slate-200 rounded-xl text-slate-600 font-bold text-[11px] uppercase tracking-wide transition-colors"
+               >
+                 🔄 Submit Alternative Version
+               </button>
+             )}
+           </div>
          ) : (
-         <form onSubmit={handleUploadAssignment} className="flex flex-col gap-3">
-           <div>
-             <textarea
-               value={message}
-               onChange={e => setMessage(e.target.value)}
-               placeholder="Any message for admin? (Optional)"
-               className="w-full text-sm p-3 border border-slate-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-teal-500 transition-all bg-slate-50"
-               rows={2}
-             />
+           <>
+             <h3 className="text-sm font-bold text-slate-800 mb-1 flex items-center gap-2">
+               <FileText className="w-4 h-4 text-teal-600" /> Submit Assignment
+             </h3>
+             <p className="text-[10px] text-slate-400 font-medium mb-2">Upload your assignment file (.pdf, .doc, .docx only) below.</p>
+             {timeLeft === 'Expired' ? (
+                <div className="bg-rose-50 border border-rose-100 p-4 rounded-xl text-center">
+                  <p className="text-sm font-bold text-rose-700">Deadline Expired</p>
+                  <p className="text-xs text-rose-600 mt-1">You can no longer submit the assignment for this topic.</p>
+                </div>
+             ) : (
+             <form onSubmit={handleUploadAssignment} className="flex flex-col gap-3">
+               <div>
+                 <textarea
+                   value={message}
+                   onChange={e => setMessage(e.target.value)}
+                   placeholder="Any message for admin? (Optional)"
+                   className="w-full text-sm p-3 border border-slate-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-teal-500 transition-all bg-slate-50 text-slate-700 font-medium"
+                   rows={2}
+                 />
+               </div>
+               <div className="relative">
+                 <input 
+                   type="file" 
+                   ref={fileInputRef}
+                   onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)}
+                   accept=".pdf,.doc,.docx"
+                   required
+                   className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:uppercase file:tracking-wider file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 transition-all"
+                 />
+               </div>
+               <button 
+                 type="submit" 
+                 disabled={!file || uploading}
+                 className="mt-2 w-full py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs uppercase tracking-widest transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm flex justify-center items-center gap-2"
+               >
+                 {uploading ? 'Uploading...' : <><UploadCloud className="w-4 h-4" /> Upload & Send to Admin</>}
+               </button>
+               
+               {uploadMessage.text && (
+                 <p className={`text-xs font-semibold mt-1 p-2.5 rounded-xl border flex items-center gap-2 ${
+                   uploadMessage.type === 'error' 
+                     ? 'text-rose-700 bg-rose-50 border-rose-100' 
+                     : 'text-teal-700 bg-teal-50 border-teal-100'
+                 }`}>
+                   <span className="shrink-0">{uploadMessage.type === 'error' ? '⚠️' : '✅'}</span>
+                   <span className="flex-1">{uploadMessage.text}</span>
+                 </p>
+               )}
+             </form>
+             )}
+           </>
+         )}
+
+         {/* Persistent/Toast confirmation message visible across state transition */}
+         {uploadMessage.text && uploadMessage.type === 'success' && topic.assignmentSubmitted && (
+           <div className="text-xs font-bold p-3 rounded-xl border flex items-start gap-2.5 shadow-sm bg-teal-50/90 border-teal-100 text-teal-800 animate-fade-in mt-1">
+             <span className="text-sm leading-none mt-0.5">🎉</span>
+             <div className="flex-1">
+               <span className="block">{uploadMessage.text}</span>
+               <span className="text-[10px] text-teal-600 block mt-1 font-semibold">Your submission is secured and visible to faculty.</span>
+             </div>
+             <button 
+               type="button" 
+               onClick={() => setUploadMessage({ type: '', text: '' })}
+               className="text-[10px] uppercase font-black tracking-wider text-teal-700 hover:text-teal-900 px-1.5 py-0.5 rounded border border-teal-200 hover:bg-teal-100 bg-white transition-all shadow-xs"
+             >
+               Okay
+             </button>
            </div>
-           <div className="relative">
-             <input 
-               type="file" 
-               ref={fileInputRef}
-               onChange={(e) => setFile(e.target.files ? e.target.files[0] : null)}
-               accept=".pdf,.doc,.docx"
-               required
-               className="w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:uppercase file:tracking-wider file:bg-teal-50 file:text-teal-700 hover:file:bg-teal-100 transition-all"
-             />
-           </div>
-           <button 
-             type="submit" 
-             disabled={!file || uploading}
-             className="mt-2 w-full py-2.5 bg-teal-600 hover:bg-teal-700 text-white font-bold rounded-xl text-xs uppercase tracking-widest transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm flex justify-center items-center gap-2"
-           >
-             {uploading ? 'Uploading...' : <><UploadCloud className="w-4 h-4" /> Upload & Send to Admin</>}
-           </button>
-           
-           {uploadMessage.text && (
-             <p className={`text-xs font-medium mt-1 p-2 rounded-lg ${uploadMessage.type === 'error' ? 'text-rose-600 bg-rose-50' : 'text-teal-600 bg-teal-50'}`}>
-               {uploadMessage.text}
-             </p>
-           )}
-         </form>
          )}
       </div>
     </div>
@@ -223,7 +373,10 @@ export default function StudentDashboard() {
     const unsubscribeTopics = onSnapshot(q, (snapshot) => {
       const topicsData: Topic[] = [];
       snapshot.forEach((doc) => {
-        topicsData.push({ id: doc.id, ...doc.data() } as Topic);
+        const data = doc.data();
+        if (data.published !== false) {
+          topicsData.push({ id: doc.id, ...data } as Topic);
+        }
       });
       // Sort by status (Available first) and then title
       topicsData.sort((a, b) => {
@@ -287,11 +440,17 @@ export default function StudentDashboard() {
           throw new Error("This topic has already been taken by someone else.");
         }
 
+        const userData = userDoc.data();
+        const finalName = userData?.name || user.displayName || 'Unknown Student';
+        const finalBatch = userData?.batch || 'Unknown Batch';
+        const finalEmail = userData?.email || user.email || 'Unknown Email';
+
         transaction.update(topicRef, {
           status: 'Taken',
           studentId: user.uid,
-          studentName: studentName || 'Unknown Student',
-          studentBatch: studentBatch || 'Unknown Batch',
+          studentName: finalName,
+          studentBatch: finalBatch,
+          studentEmail: finalEmail,
           timestamp: new Date().toISOString()
         });
 

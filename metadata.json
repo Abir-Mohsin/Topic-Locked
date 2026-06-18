@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "Topic Submission Portal",
+  "description": "An assignment portal where students claim research topics, request reviews, submit files, and admins manage submissions with automated emails and AI-driven topic generation.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
